@@ -16,6 +16,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	neutronv1 "github.com/openstack-k8s-operators/neutron-operator/api/v1beta1"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,6 +35,7 @@ func Deployment(
 	configHash string,
 	labels map[string]string,
 	annotations map[string]string,
+	tlsDeploymentResources *tls.DeploymentResources,
 ) *appsv1.Deployment {
 	livenessProbe := &corev1.Probe{
 		// TODO might need tuning
@@ -78,6 +80,15 @@ func Deployment(
 		}
 	}
 
+	// create Volume and VolumeMounts
+	volumes := GetVolumes(instance.Name, instance.Spec.ExtraMounts, NeutronAPIPropagation)
+	volumeMounts := GetVolumeMounts("neutron-api", instance.Spec.ExtraMounts, NeutronAPIPropagation)
+
+	if tlsDeploymentResources != nil {
+		volumes = append(volumes, tlsDeploymentResources.GetVolumes(false)...)
+		volumeMounts = append(volumeMounts, tlsDeploymentResources.GetVolumeMounts(false)...)
+	}
+
 	envVars := map[string]env.Setter{}
 	envVars["CONFIG_HASH"] = env.SetValue(configHash)
 
@@ -97,6 +108,7 @@ func Deployment(
 					Labels:      labels,
 				},
 				Spec: corev1.PodSpec{
+					SecurityContext:    getNeutronSecurityContext(),
 					ServiceAccountName: instance.RbacResourceName(),
 					Containers: []corev1.Container{
 						{
@@ -104,20 +116,19 @@ func Deployment(
 							Command:                  []string{cmd},
 							Args:                     args,
 							Image:                    instance.Spec.ContainerImage,
-							SecurityContext:          getNeutronSecurityContext(),
 							Env:                      env.MergeEnvs([]corev1.EnvVar{}, envVars),
-							VolumeMounts:             GetVolumeMounts("neutron-api", instance.Spec.ExtraMounts, NeutronAPIPropagation),
+							VolumeMounts:             volumeMounts,
 							Resources:                instance.Spec.Resources,
 							ReadinessProbe:           readinessProbe,
 							LivenessProbe:            livenessProbe,
 							TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 						},
 					},
+					Volumes: volumes,
 				},
 			},
 		},
 	}
-	deployment.Spec.Template.Spec.Volumes = GetVolumes(instance.Name, instance.Spec.ExtraMounts, NeutronAPIPropagation)
 	// If possible two pods of the same service should not
 	// run on the same worker node. If this is not possible
 	// the get still created on the same worker node.

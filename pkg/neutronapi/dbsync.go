@@ -27,16 +27,16 @@ func DbSyncJob(
 		Spec: batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
+					SecurityContext:    getNeutronSecurityContext(),
 					RestartPolicy:      corev1.RestartPolicyOnFailure,
 					ServiceAccountName: cr.RbacResourceName(),
 					Containers: []corev1.Container{
 						{
-							Command:         []string{"neutron-db-manage"},
-							Args:            []string{"upgrade", "heads"},
-							Name:            cr.Name + "-db-sync",
-							Image:           cr.Spec.ContainerImage,
-							SecurityContext: getNeutronSecurityContext(),
-							VolumeMounts:    volumeMounts,
+							Command:      []string{"neutron-db-manage"},
+							Args:         []string{"upgrade", "heads"},
+							Name:         cr.Name + "-db-sync",
+							Image:        cr.Spec.ContainerImage,
+							VolumeMounts: volumeMounts,
 						},
 					},
 					Volumes: volumes,

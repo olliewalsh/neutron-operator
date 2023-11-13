@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -34,9 +35,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	certmgrv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/certmanager"
 	"github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/deployment"
@@ -49,6 +52,7 @@ import (
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	mariadbv1 "github.com/openstack-k8s-operators/mariadb-operator/api/v1beta1"
 	neutronv1beta1 "github.com/openstack-k8s-operators/neutron-operator/api/v1beta1"
@@ -90,6 +94,8 @@ type NeutronAPIReconciler struct {
 // +kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=transporturls,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=memcached.openstack.org,resources=memcacheds,verbs=get;list;watch;
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cert-manager.io,resources=issuers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete;
 
 // service account, role, rolebinding
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
@@ -834,13 +840,98 @@ func (r *NeutronAPIReconciler) reconcileNormal(ctx context.Context, instance *ne
 		return ctrlResult, nil
 	}
 
+	// Handle OVN dbs TLS cert/key
+	var tlsDeploymentResources *tls.DeploymentResources
+	if instance.Spec.TLS.OvnDbIssuer != "" {
+		// generate certificate
+		certRequest := certmanager.CertificateRequest{
+			IssuerName: instance.Spec.TLS.OvnDbIssuer,
+			CertName:   fmt.Sprintf("%s-svc", instance.Name),
+			Duration:   nil,
+			// Not the actual hostname but must provide something to generate the cert
+			Hostnames: []string{
+				fmt.Sprintf("%s.%s.svc", neutronapi.ServiceName, instance.Namespace),
+				fmt.Sprintf("%s.%s.svc.cluster.local", neutronapi.ServiceName, instance.Namespace),
+			},
+			Ips:         nil,
+			Annotations: map[string]string{},
+			Labels:      serviceLabels,
+			Usages: []certmgrv1.KeyUsage{
+				certmgrv1.UsageClientAuth,
+			},
+		}
+		certSecret, ctrlResult, err := certmanager.EnsureCert(
+			ctx,
+			helper,
+			certRequest)
+		if err != nil {
+			return ctrlResult, err
+		} else if (ctrlResult != ctrl.Result{}) {
+			return ctrlResult, nil
+		}
+
+		values := [][]byte{}
+		if certSecret != nil {
+			for _, field := range []string{"tls.key", "tls.crt"} {
+				val, ok := certSecret.Data[field]
+				if !ok {
+					return ctrl.Result{}, fmt.Errorf("field %s not found in Secret %s", field, certSecret.Name)
+				}
+				values = append(values, val)
+			}
+		}
+
+		hash, err := util.ObjectHash(values)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		tlsDeploymentResources = &tls.DeploymentResources{
+			Volumes: []tls.Volume{
+				{
+					IsCA: false,
+					Hash: hash,
+					Volume: corev1.Volume{
+						Name: fmt.Sprintf("tls-certs-%s", instance.Name),
+						VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{
+								SecretName:  certSecret.Name,
+								DefaultMode: ptr.To[int32](0440),
+							},
+						},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      fmt.Sprintf("tls-certs-%s", instance.Name),
+							MountPath: "/etc/pki/tls/certs/ovn_dbs.crt",
+							SubPath:   "tls.crt",
+							ReadOnly:  true,
+						},
+						{
+							Name:      fmt.Sprintf("tls-certs-%s", instance.Name),
+							MountPath: "/etc/pki/tls/private/ovn_dbs.key",
+							SubPath:   "tls.key",
+							ReadOnly:  true,
+						},
+						{
+							Name:      fmt.Sprintf("tls-certs-%s", instance.Name),
+							MountPath: "/etc/pki/tls/certs/ovn_dbs_ca.crt",
+							SubPath:   "ca.crt",
+							ReadOnly:  true,
+						},
+					},
+				},
+			},
+		}
+	}
+
 	// Define a new Deployment object
 	inputHash, ok := instance.Status.Hash[common.InputHashName]
 	if !ok {
 		return ctrlResult, fmt.Errorf("Failed to fetch input hash for Neutron deployment")
 	}
 
-	deplDef := neutronapi.Deployment(instance, inputHash, serviceLabels, serviceAnnotations)
+	deplDef := neutronapi.Deployment(instance, inputHash, serviceLabels, serviceAnnotations, tlsDeploymentResources)
 	depl := deployment.NewDeployment(
 		deplDef,
 		time.Duration(5)*time.Second,
@@ -1181,6 +1272,7 @@ func (r *NeutronAPIReconciler) ensureExternalMetadataAgentSecret(
 	}
 	templateParameters := make(map[string]interface{})
 	templateParameters["SBConnection"] = sbEndpoint
+	templateParameters["TLS"] = instance.Spec.TLS.OvnDbIssuer != ""
 
 	secretName := getMetadataAgentSecretName(instance)
 	return r.ensureExternalSecret(ctx, h, instance, secretName, templates, templateParameters, envVars)
@@ -1200,6 +1292,7 @@ func (r *NeutronAPIReconciler) ensureExternalOvnAgentSecret(
 	templateParameters := make(map[string]interface{})
 	templateParameters["NBConnection"] = nbEndpoint
 	templateParameters["SBConnection"] = sbEndpoint
+	templateParameters["TLS"] = instance.Spec.TLS.OvnDbIssuer != ""
 
 	secretName := getOvnAgentSecretName(instance)
 	return r.ensureExternalSecret(ctx, h, instance, secretName, templates, templateParameters, envVars)
@@ -1326,6 +1419,7 @@ func (r *NeutronAPIReconciler) generateServiceSecrets(
 	// OVN
 	templateParameters["NBConnection"] = nbEndpoint
 	templateParameters["SBConnection"] = sbEndpoint
+	templateParameters["TLS"] = instance.Spec.TLS.OvnDbIssuer != ""
 
 	secrets := []util.Template{
 		{

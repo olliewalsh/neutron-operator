@@ -2237,6 +2237,17 @@ spec:
                 description: ServiceUser - optional username used for this service
                   to register in neutron
                 type: string
+              tls:
+                description: TLS - Parameters related to the TLS
+                properties:
+                  caSecretName:
+                    description: CA bundle to trust for all client use cases
+                    type: string
+                  ovnDbIssuer:
+                    description: TLS CA issuer to trust for Ovn Database and to generate
+                      certificates
+                    type: string
+                type: object
             required:
             - containerImage
             - databaseInstance

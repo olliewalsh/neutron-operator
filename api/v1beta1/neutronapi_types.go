@@ -39,6 +39,16 @@ const (
 	NeutronAPIContainerImage = "quay.io/podified-antelope-centos9/openstack-neutron-server:current-podified"
 )
 
+// TLS - encapsulates both the global CA bundle and OvnDb cert issuer
+type TLS struct {
+	// +kubebuilder:validation:Optional
+	// CA bundle to trust for all client use cases
+	CaSecretName string `json:"caSecretName,omitempty"`
+	// +kubebuilder:validation:Optional
+	// TLS CA issuer to trust for Ovn Database and to generate certificates
+	OvnDbIssuer string `json:"ovnDbIssuer,omitempty"`
+}
+
 // NeutronAPISpec defines the desired state of NeutronAPI
 type NeutronAPISpec struct {
 	// +kubebuilder:validation:Optional
@@ -63,7 +73,6 @@ type NeutronAPISpec struct {
 	// RabbitMQ instance name
 	// Needed to request a transportURL that is created and used in Neutron
 	RabbitMqClusterName string `json:"rabbitMqClusterName"`
-
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default=memcached
@@ -132,6 +141,10 @@ type NeutronAPISpec struct {
 	// +kubebuilder:validation:Optional
 	// Override, provides the ability to override the generated manifest of several child resources.
 	Override APIOverrideSpec `json:"override,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// TLS - Parameters related to the TLS
+	TLS TLS `json:"tls,omitempty"`
 }
 
 // APIOverrideSpec to override the generated manifest of several child resources.
