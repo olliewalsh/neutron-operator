@@ -38,6 +38,7 @@ func DbSyncJob(
 		Spec: batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
+					NodeSelector:       cr.Spec.NodeSelector,
 					RestartPolicy:      corev1.RestartPolicyOnFailure,
 					ServiceAccountName: cr.RbacResourceName(),
 					Containers: []corev1.Container{
